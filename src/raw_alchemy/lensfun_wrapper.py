@@ -133,6 +133,9 @@ if _lensfun:
     _lensfun.lf_db_load.restype = ctypes.c_int
     _lensfun.lf_db_load.argtypes = [ctypes.POINTER(lfDatabase)]
     
+    _lensfun.lf_db_load_path.restype = ctypes.c_int
+    _lensfun.lf_db_load_path.argtypes = [ctypes.POINTER(lfDatabase), ctypes.c_char_p]
+    
     _lensfun.lf_db_find_cameras_ext.restype = ctypes.POINTER(ctypes.POINTER(lfCamera))
     _lensfun.lf_db_find_cameras_ext.argtypes = [
         ctypes.POINTER(lfDatabase),
@@ -230,10 +233,26 @@ class LensfunDatabase:
         if not self.db:
             raise RuntimeError("无法创建lensfun数据库")
         
-        # 加载数据库
-        result = _lensfun.lf_db_load(self.db)
+        # 检查本地数据库路径
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        db_path = os.path.join(current_dir, "vendor", "lensfun", "db")
+        
+        result = -1
+        if os.path.isdir(db_path):
+            print(f"  ✨ [Lensfun] Found local database, loading from: {db_path}")
+            result = _lensfun.lf_db_load_path(self.db, db_path.encode('utf-8'))
+        else:
+            print(f"  ℹ️ [Lensfun] Local database not found, loading from system default paths.")
+            result = _lensfun.lf_db_load(self.db)
+
+        # 检查加载结果
         if result != 0:
-            raise RuntimeError(f"加载lensfun数据库失败，错误代码: {result}")
+            error_msg = f"加载lensfun数据库失败，错误代码: {result}"
+            if result == 2:  # LF_IO_ERROR
+                error_msg += "\n  💡 [Hint] 数据库文件未找到或无法读取。"
+                error_msg += f"\n     - 检查路径是否正确: {db_path if os.path.isdir(db_path) else 'System paths'}"
+                error_msg += "\n     - 确保文件权限正确。"
+            raise RuntimeError(error_msg)
     
     def __del__(self):
         if hasattr(self, 'db') and self.db:
