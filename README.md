@@ -99,6 +99,7 @@ The graphical interface provides an intuitive way to process your images.
 
 *   **Log Space**: Choose the target Log color space from the dropdown menu (e.g., `F-Log2`, `S-Log3`). This is a required setting.
 *   **LUT File (.cube)**: (Optional) If you want to apply a creative look, click **Browse...** and select a `.cube` LUT file.
+*   **Custom Lensfun DB**: (Optional) To use a custom lens database (e.g., one generated from LCP files), click **Browse...** and select the `.xml` file.
 
 #### 3. Adjust Exposure
 
@@ -139,12 +140,16 @@ The conversion script `lensfun-convert-lcp` is bundled with the source code.
     python3 src/raw_alchemy/vendor/lensfun/linux-x86_64/lensfun-convert-lcp /path/to/your/lcp/files
     ```
 
-3.  **Check the output.**
-    The script will create a file named `_lcps.xml` in your user's Lensfun database directory.
-    *   **Windows**: `C:\Users\<YourUsername>\.local\share\lensfun\_lcps.xml`
-    *   **Linux**: `~/.local/share/lensfun/_lcps.xml`
+    **Recommendation for De-duplication:** The script can check against an existing database to avoid creating duplicate entries. It is highly recommended to use the `--db-path` argument to point to the bundled database. This ensures that only new, unconverted lenses are added to your custom file.
 
-    Once this file is in place, Raw Alchemy will automatically use these new profiles for lens correction. You can specify a different output file using the `--output` argument. For more details, run the script with `--help`.
+    ```bash
+    # Example with de-duplication on Windows
+    python src/raw_alchemy/vendor/lensfun/win-x86_64/lensfun-convert-lcp "C:\ProgramData\Adobe\CameraRaw\LensProfiles\1.0" --db-path "src/raw_alchemy/vendor/lensfun/db"
+    ```
+
+3.  The script will create an `.xml` file (e.g., `_lcps.xml`). You can now load this file into Raw Alchemy using the GUI or CLI, as explained in the sections below.
+
+    The conversion script saves to a default location, but you can use its `--output` argument to save the `.xml` file anywhere you like. For more details, run the script with `--help`.
 
 ### CLI Usage
 
@@ -163,6 +168,15 @@ RawAlchemy-v0.1.0-windows.exe [OPTIONS] <INPUT_RAW_PATH> <OUTPUT_TIFF_PATH>
 
 # If installed from source
 raw-alchemy [OPTIONS] <INPUT_RAW_PATH> <OUTPUT_TIFF_PATH>
+```
+
+#### Example 4: Using a Custom Lens Database
+
+This example uses a custom lens database file for more accurate lens corrections.
+
+```bash
+# Replace './RawAlchemy-linux' with your executable name or 'raw-alchemy'
+./RawAlchemy-linux "input.ARW" "output.tiff" --log-space "S-Log3" --custom-lensfun-db "path/to/your/_lcps.xml"
 ```
 
 #### Example 1: Basic Log Conversion
@@ -201,6 +215,7 @@ This example manually applies a +1.5 stop exposure compensation, overriding any 
 -   `--exposure FLOAT`: (Optional) Manual exposure adjustment in stops (e.g., -0.5, 1.0). Overrides all auto exposure logic.
 -   `--lut TEXT`: (Optional) Path to a `.cube` LUT file to apply after Log conversion.
 -   `--lens-correct / --no-lens-correct`: (Optional, Default: True) Enable or disable lens distortion correction.
+-   `--custom-lensfun-db TEXT`: (Optional) Path to a custom Lensfun database XML file (e.g., one generated from LCP files).
 -   `--metering TEXT`: (Optional, Default: `hybrid`) Auto exposure metering mode: `average` (geometric mean), `center-weighted`, `highlight-safe` (ETTR), or `hybrid` (default).
 
 ### Supported Log Spaces

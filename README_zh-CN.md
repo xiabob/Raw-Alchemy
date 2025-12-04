@@ -99,6 +99,7 @@ pip install .
 
 *   **Log Space** (Log 空间): 从下拉菜单中选择目标 Log 色彩空间 (例如 `F-Log2`, `S-Log3`)。这是一个必填项。
 *   **LUT File (.cube)** (LUT 文件): (可选) 如果您想应用一个创意风格，点击 **Browse...** (浏览) 并选择一个 `.cube` 格式的 LUT 文件。
+*   **Custom Lensfun DB** (自定义镜头数据库): (可选) 要使用自定义的镜头数据库 (例如从 LCP 文件生成的)，点击 **Browse...** (浏览) 并选择对应的 `.xml` 文件。
 
 #### 3. 调整曝光
 
@@ -139,12 +140,16 @@ Raw Alchemy 现在包含一个强大的脚本，用于转换和导入 Adobe LCP 
     python3 src/raw_alchemy/vendor/lensfun/linux-x86_64/lensfun-convert-lcp /path/to/your/lcp/files
     ```
 
-3.  **检查输出。**
-    脚本将在您用户的 Lensfun 数据库目录中创建一个名为 `_lcps.xml` 的文件。
-    *   **Windows**: `C:\Users\<您的用户名>\.local\share\lensfun\_lcps.xml`
-    *   **Linux**: `~/.local/share/lensfun/_lcps.xml`
+3.  脚本将创建一个 `.xml` 文件 (例如 `_lcps.xml`)。您现在可以按照下面章节的说明，在图形界面或命令行中加载此文件。
 
-    一旦该文件就位，Raw Alchemy 将自动使用这些新的配置文件进行镜头校正。您可以使用 `--output` 参数指定不同的输出文件。更多详情，请使用 `--help` 参数运行脚本。
+    转换脚本会保存到默认位置，但您也可以使用其 `--output` 参数将 `.xml` 文件保存到任何您喜欢的地方。更多详情，请使用 `--help` 参数运行该脚本。
+
+    **去重建议：** 该脚本可以与现有数据库进行比对，以避免创建重复条目。强烈建议使用 `--db-path` 参数指向项目自带的数据库。这能确保只有新的、未转换过的镜头才会被添加到您的自定义文件中。
+
+    ```bash
+    # 在 Windows 上使用去重功能示例
+    python src/raw_alchemy/vendor/lensfun/win-x86_64/lensfun-convert-lcp "C:\ProgramData\Adobe\CameraRaw\LensProfiles\1.0" --db-path "src/raw_alchemy/vendor/lensfun/db"
+    ```
 
 ### CLI 用法
 
@@ -163,6 +168,15 @@ RawAlchemy-v0.1.0-windows.exe [OPTIONS] <INPUT_RAW_PATH> <OUTPUT_TIFF_PATH>
 
 # 如果从源码安装
 raw-alchemy [OPTIONS] <INPUT_RAW_PATH> <OUTPUT_TIFF_PATH>
+```
+
+#### 示例 4: 使用自定义镜头数据库
+
+此示例使用一个自定义的镜头数据库文件，以获得更精确的镜头校正。
+
+```bash
+# 将 './RawAlchemy-linux' 替换为您的可执行文件名或 'raw-alchemy'
+./RawAlchemy-linux "input.ARW" "output.tiff" --log-space "S-Log3" --custom-lensfun-db "path/to/your/_lcps.xml"
 ```
 
 #### 示例 1: 基本 Log 转换
@@ -201,6 +215,7 @@ raw-alchemy [OPTIONS] <INPUT_RAW_PATH> <OUTPUT_TIFF_PATH>
 -   `--exposure FLOAT`: (可选) 手动曝光调整，单位为档 (stops)，例如 -0.5, 1.0。此选项会覆盖所有自动曝光逻辑。
 -   `--lut TEXT`: (可选) 在 Log 转换后应用的 `.cube` LUT 文件路径。
 -   `--lens-correct / --no-lens-correct`: (可选, 默认: True) 启用或禁用镜头畸变校正。
+-   `--custom-lensfun-db TEXT`: (可选) 自定义 Lensfun 数据库 XML 文件的路径 (例如从 LCP 文件生成的)。
 -   `--metering TEXT`: (可选, 默认: `hybrid`) 自动曝光测光模式: `average` (平均), `center-weighted` (中央重点), `highlight-safe` (高光保护), 或 `hybrid` (混合)。
 
 ### 支持的 Log 空间
