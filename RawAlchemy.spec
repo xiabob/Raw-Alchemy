@@ -17,10 +17,29 @@ if sys.platform == 'darwin':
     import os
     import rawpy
 
-    # Find the path to libraw_r.dylib within the rawpy package
+    # Find the path to libraw_r.so within the rawpy package
     rawpy_path = os.path.dirname(rawpy.__file__)
-    libraw_dylib_path = os.path.join(rawpy_path, 'libraw_r.dylib')
-    binaries_list.append((libraw_dylib_path, '.'))
+    dylib_file = None
+    for f in os.listdir(rawpy_path):
+        if f.startswith('libraw_r.dylib'):
+            so_file = os.path.join(rawpy_path, f)
+            break
+    if so_file:
+        binaries_list.append((dylib_file, '.'))
+
+elif sys.platform.startswith('linux'):
+    import os
+    import rawpy
+
+    # Find the path to libraw_r.so within the rawpy package
+    rawpy_path = os.path.dirname(rawpy.__file__)
+    so_file = None
+    for f in os.listdir(rawpy_path):
+        if f.startswith('libraw_r.so'):
+            so_file = os.path.join(rawpy_path, f)
+            break
+    if so_file:
+        binaries_list.append((so_file, '.'))
 
 
 a = Analysis(

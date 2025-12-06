@@ -185,8 +185,10 @@ class GuiApplication(tk.Frame):
                 child.config(state="normal")
 
     def browse_input_file(self):
-        # Create a file type string from the supported extensions
-        file_types = [("RAW files", " ".join(f"*{ext}" for ext in SUPPORTED_RAW_EXTENSIONS)), ("All files", "*.*")]
+        # Create a file type string from the supported extensions, including both lower and upper case
+        # to ensure compatibility with case-sensitive file systems like Linux.
+        ext_patterns = " ".join(f"*{ext} *{ext.upper()}" for ext in SUPPORTED_RAW_EXTENSIONS)
+        file_types = [("RAW files", ext_patterns), ("All files", "*.*")]
         path = filedialog.askopenfilename(filetypes=file_types)
         if path:
             self.input_path_var.set(path)
