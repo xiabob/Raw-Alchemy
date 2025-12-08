@@ -132,8 +132,8 @@ class GuiApplication(tk.Frame):
         self.auto_opts_frame = ttk.Frame(ctrl_frame)
         self.auto_opts_frame.pack(side="left", padx=10)
         ttk.Label(self.auto_opts_frame, text="Method:").pack(side="left")
-        self.metering_mode_var = tk.StringVar(value='hybrid')
-        ttk.OptionMenu(self.auto_opts_frame, self.metering_mode_var, 'hybrid', *core.METERING_MODES).pack(side="left", padx=5)
+        self.metering_mode_var = tk.StringVar(value='matrix')
+        ttk.OptionMenu(self.auto_opts_frame, self.metering_mode_var, 'matrix', *core.METERING_MODES).pack(side="left", padx=5)
 
         # Manual Mode
         ttk.Frame(ctrl_frame, width=20).pack(side="left") # Spacer

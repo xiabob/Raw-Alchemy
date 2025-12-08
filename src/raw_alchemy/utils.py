@@ -278,6 +278,83 @@ def auto_expose_hybrid(img_linear: np.ndarray, source_colorspace, target_gray: f
     apply_gain_inplace(img_linear, float(gain))
     return img_linear
 
+def auto_expose_matrix(img_linear: np.ndarray, source_colorspace, target_gray: float = 0.18, logger: callable = print) -> np.ndarray:
+    """
+    高级评价测光 (模拟矩阵测光)。
+    1. 将图像划分为 7x7 网格。
+    2. 计算每个网格的平均亮度。
+    3. 基于位置、亮度和与中心的关系，为每个网格分配权重。
+    4. 计算加权平均亮度并确定曝光增益。
+    """
+    # 1. 下采样以提高性能
+    sample = get_subsampled_view(img_linear, target_size=512)
+    h, w, _ = sample.shape
+    
+    # 2. 计算亮度图
+    coeffs = get_luminance_coeffs(source_colorspace)
+    luminance = np.dot(sample, coeffs)
+    
+    # 3. 定义网格
+    grid_size = 7
+    grid_h, grid_w = h // grid_size, w // grid_size
+    
+    # 4. 计算每个网格的平均亮度和权重
+    grid_lums = np.zeros((grid_size, grid_size))
+    for i in range(grid_size):
+        for j in range(grid_size):
+            cell = luminance[i*grid_h:(i+1)*grid_h, j*grid_w:(j+1)*grid_w]
+            if cell.size > 0:
+                grid_lums[i, j] = np.mean(cell)
+
+    # 5. 智能加权
+    weights = np.ones((grid_size, grid_size))
+    
+    # 5.1 中心偏置 (高斯权重)
+    y, x = np.ogrid[:grid_size, :grid_size]
+    center_y, center_x = (grid_size - 1) / 2.0, (grid_size - 1) / 2.0
+    dist_sq = (x - center_x)**2 + (y - center_y)**2
+    # sigma 稍大，权重分布更平滑
+    sigma = grid_size / 2.5
+    center_bias = np.exp(-dist_sq / (2 * sigma**2))
+    weights *= (1 + center_bias * 1.5) # 中心权重最高为 2.5 倍
+
+    # 5.2 高光抑制
+    # 亮度高于 90% 分位数的区域，权重降低
+    lum_percentile_90 = np.percentile(grid_lums, 90)
+    highlight_zones = grid_lums > lum_percentile_90
+    weights[highlight_zones] *= 0.2 # 高光区域权重打 2 折
+
+    # 5.3 暗部关注
+    # 亮度低于 10% 分位数的区域，权重轻微提升
+    lum_percentile_10 = np.percentile(grid_lums, 10)
+    shadow_zones = grid_lums < lum_percentile_10
+    weights[shadow_zones] *= 1.2 # 暗部区域权重提升 20%
+
+    # 6. 计算最终加权平均亮度
+    weighted_avg_lum = np.average(grid_lums, weights=weights)
+    
+    if weighted_avg_lum < 1e-6:
+        gain = 1.0
+    else:
+        gain = target_gray / weighted_avg_lum
+
+    # 7. 与 Hybrid 类似的保护性削减
+    max_vals = np.max(sample, axis=2)
+    p99 = np.percentile(max_vals, 99.0)
+    potential_peak = p99 * gain
+    max_allowed_peak = 6.0
+    
+    if potential_peak > max_allowed_peak:
+        limited_gain = max_allowed_peak / p99
+        logger(f"  🛡️  [Auto Exposure] Matrix limited. (Desired: {gain:.2f} -> Actual: {limited_gain:.2f})")
+        gain = limited_gain
+
+    gain = np.clip(gain, 0.1, 100.0)
+    logger(f"  🤖 [Auto Exposure] Matrix Gain: {gain:.4f}")
+    
+    apply_gain_inplace(img_linear, float(gain))
+    return img_linear
+
 # ----------------- 镜头校正 (保持逻辑，优化注释) -----------------
 
 def apply_lens_correction(image: np.ndarray, exif_data: dict, custom_db_path: Optional[str] = None, logger: callable = print, **kwargs) -> np.ndarray:

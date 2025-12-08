@@ -46,6 +46,7 @@ METERING_MODES = [
     'center-weighted',# 中央重点
     'highlight-safe', # 高光保护 (ETTR)
     'hybrid',         # 混合 (平均 + 高光限制)
+    'matrix',         # 矩阵/评价测光
 ]
 
 # ==========================================
@@ -122,7 +123,9 @@ def process_image(
             img = utils.auto_expose_highlight_safe(img, clip_threshold=1.0, logger=_log)
         elif metering_mode == 'average':
             img = utils.auto_expose_linear(img, source_cs, target_gray=0.18, logger=_log)
-        else:
+        elif metering_mode == 'matrix':
+            img = utils.auto_expose_matrix(img, source_cs, target_gray=0.18, logger=_log)
+        else: # hybrid as default
             img = utils.auto_expose_hybrid(img, source_cs, target_gray=0.18, logger=_log)
 
     # --- Step 3: 镜头校正 & 风格化 ---

@@ -108,6 +108,14 @@ You can choose between two modes:
 *   **Auto**: This is the default mode. You can select a **Metering** method from the dropdown (`hybrid`, `average`, etc.) to let the application determine the best exposure automatically.
 *   **Manual**: Select this mode to override auto-exposure. You can then enter a specific EV value in the **EV Stops** box or use the slider to adjust the exposure compensation manually.
 
+The **Metering** dropdown (available in `Auto` mode) lets you choose a strategy for automatic exposure adjustment:
+
+*   **`matrix` (Default)**: An advanced evaluative metering mode. It divides the image into a 7x7 grid, intelligently weighting each zone based on brightness and position. It actively suppresses highlights and boosts shadows, providing the most balanced and reliable exposure for complex scenes.
+*   **`hybrid`**: A simpler, faster intelligent mode. It aims for a balanced average exposure but will automatically reduce brightness to prevent highlights from blowing out.
+*   **`average`**: Calculates the average brightness of the entire scene and adjusts it to middle gray. Best for evenly lit scenes.
+*   **`center-weighted`**: Prioritizes the brightness of the center of the frame. Ideal for portraits or centered subjects.
+*   **`highlight-safe` (ETTR)**: Exposes the image as brightly as possible without clipping highlights. This captures maximum shadow detail but may require lowering exposure in post.
+
 #### 4. Start Processing
 
 *   Click the **Start Processing** button.
