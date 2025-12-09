@@ -502,7 +502,10 @@ def apply_lens_correction(
         modifier.enable_distortion_correction()
         # 获取并应用自动缩放以消除黑边
         auto_scale = modifier.get_auto_scale()
-        modifier.enable_scaling(1.0/auto_scale)
+        if auto_scale < 1.0:
+            modifier.enable_scaling(1.0/auto_scale)
+        else:
+            modifier.enable_scaling(auto_scale)
         logger(f"  ⚖️ [Lensfun] Auto-scaling enabled with factor: {auto_scale:.4f}")
 
     if correct_tca:
