@@ -2,3 +2,4 @@
 /build/
 /src/raw_alchemy.egg-info/
 /dist/
+__pycache__
