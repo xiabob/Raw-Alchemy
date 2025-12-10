@@ -96,6 +96,14 @@ def process_image(
 
     source_cs = colour.RGB_COLOURSPACES['ProPhoto RGB']
 
+    # Debug: dump decoded ProPhoto linear (float32) before any processing
+    debug_dump_decoded_prophoto_path = '/tmp/raw_alchemy_prophoto_float.bin'
+    if debug_dump_decoded_prophoto_path:
+        out = img.astype(np.float32, copy=False)
+        out.tofile(debug_dump_decoded_prophoto_path)
+        h, w, _ = out.shape
+        _log(f"  🧪 [Debug] Dumped decoded ProPhoto float32 to {debug_dump_decoded_prophoto_path} (w={w}, h={h}, bytes={out.nbytes})")
+
     # --- Step 2: 曝光控制 (二选一) ---
     # 定义最终使用的增益 gain
     gain = 1.0
@@ -159,8 +167,26 @@ def process_image(
     # Log 编码前必须裁剪负值
     np.maximum(img, 1e-6, out=img)
 
+    # Debug: dump pre-log (after matrix+clamp) if requested
+    debug_dump_prelog_float_path = '/tmp/raw_alchemy_prelog_float.bin'
+    if debug_dump_prelog_float_path:
+        out = img.astype(np.float32, copy=False)
+        out.tofile(debug_dump_prelog_float_path)
+        h, w, _ = out.shape
+        _log(f"  🧪 [Debug] Dumped pre-log RGB float32 to {debug_dump_prelog_float_path} (w={w}, h={h}, bytes={out.nbytes})")
+
     # 4.2 Curve 编码
     img = colour.cctf_encoding(img, function=log_curve_name)
+
+    # 可选：导出 Log 编码后的 float32 buffer，便于与 Swift 端二进制对比
+    debug_dump_log_float_path = '/tmp/raw_alchemy_log_float.bin'
+    if debug_dump_log_float_path:
+        if not img.flags['C_CONTIGUOUS']:
+            img = np.ascontiguousarray(img)
+        out = img.astype(np.float32, copy=False)
+        out.tofile(debug_dump_log_float_path)
+        h, w, _ = out.shape
+        _log(f"  🧪 [Debug] Dumped log RGB float32 to {debug_dump_log_float_path} (w={w}, h={h}, bytes={out.nbytes})")
 
     # --- Step 5: LUT (Numba In-Place) ---
     if lut_path:
