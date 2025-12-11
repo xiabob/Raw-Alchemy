@@ -19,72 +19,88 @@ def process_path(
     jobs,
     logger_func, # A function to handle logging, e.g., print or queue.put
     output_format: str = 'tif',
+    generate_tiff_only: bool = False,
+    generate_xmp_profile: bool = False,
 ):
     """
     Orchestrates the processing of a single file or a directory of files.
-    Updated to support GUI Progress Bar signaling.
+    Supports different processing modes based on user selection.
     """
     
-    # --- Helper Functions ---
     def log_message(msg):
-        """发送普通文本日志"""
         if hasattr(logger_func, 'put'):
-            # 如果是 GUI 队列，这里其实可以包一层结构，也可以发纯文本
-            # 这里的 logger_func 就是 mp_queue
-            logger_func.put(msg) 
+            logger_func.put(msg)
         else:
             logger_func(msg)
 
     def send_signal(data):
-        """发送控制信号 (字典)，用于进度条控制"""
         if hasattr(logger_func, 'put'):
             logger_func.put(data)
 
-    output_ext = f".{output_format}"
-
-    # ============================
-    #      Batch Processing
-    # ============================
-    if os.path.isdir(input_path):
+    # --- Task Definition ---
+    is_batch = os.path.isdir(input_path)
+    
+    if is_batch:
         if not os.path.isdir(output_path):
             error_msg = "For batch processing, the output path must be a directory."
             log_message(f"❌ Error: {error_msg}")
             raise ValueError(error_msg)
-
-        raw_files = []
-        for ext in SUPPORTED_RAW_EXTENSIONS:
-            raw_files.extend([f for f in os.listdir(input_path) if f.lower().endswith(ext)])
+        
+        raw_files = [
+            f for ext in SUPPORTED_RAW_EXTENSIONS
+            for f in os.listdir(input_path) if f.lower().endswith(ext)
+        ]
 
         if not raw_files:
             log_message("⚠️ No supported RAW files found in the input directory.")
-            raise ValueError("No RAW files found.")
-
-        # 【关键修改 1】发送总文件数信号，通知 GUI 初始化进度条
+            return # Don't raise an error, just inform the user.
+        
         count = len(raw_files)
         log_message(f"🔍 Found {count} RAW files for parallel processing.")
-        send_signal({'total_files': count}) 
-        
+        send_signal({'total_files': count})
+
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
-            futures = {
-                executor.submit(
-                    core.process_image,
-                    raw_path=os.path.join(input_path, filename),
-                    output_path=os.path.join(output_path, f"{os.path.splitext(filename)[0]}{output_ext}"),
-                    log_space=log_space,
-                    lut_path=lut_path,
-                    exposure=exposure,
-                    lens_correct=lens_correct,
-                    custom_db_path=custom_db_path,
-                    metering_mode=metering_mode,
-                    # Pass queue directly if it is one (for internal logging inside the worker)
-                    log_queue=logger_func if hasattr(logger_func, 'put') else None 
-                ): filename for filename in raw_files
-            }
-            
+            futures = {}
+            for filename in raw_files:
+                common_kwargs = {
+                    'raw_path': os.path.join(input_path, filename),
+                    'exposure': exposure,
+                    'lens_correct': lens_correct,
+                    'custom_db_path': custom_db_path,
+                    'metering_mode': metering_mode,
+                    'log_queue': logger_func if hasattr(logger_func, 'put') else None
+                }
+
+                if generate_xmp_profile:
+                    target_func = core.process_with_xmp
+                    task_kwargs = {
+                        **common_kwargs,
+                        'output_path': os.path.join(output_path, os.path.splitext(filename)[0]),
+                        'log_space': log_space,
+                        'lut_path': lut_path,
+                    }
+                elif generate_tiff_only:
+                    target_func = core.generate_prophoto_tiff
+                    task_kwargs = {
+                        **common_kwargs,
+                        'output_path': os.path.join(output_path, f"{os.path.splitext(filename)[0]}.tif"),
+                    }
+                else:
+                    target_func = core.process_image
+                    task_kwargs = {
+                        **common_kwargs,
+                        'output_path': os.path.join(output_path, f"{os.path.splitext(filename)[0]}.{output_format}"),
+                        'log_space': log_space,
+                        'lut_path': lut_path,
+                    }
+                
+                future = executor.submit(target_func, **task_kwargs)
+                futures[future] = filename
+
             for future in concurrent.futures.as_completed(futures):
                 filename = futures[future]
                 try:
-                    future.result()  # Check for exceptions
+                    future.result()
                 except Exception as exc:
                     log_msg = f"❌ Generated an exception: {exc}"
                     if hasattr(logger_func, 'put'):
@@ -92,39 +108,62 @@ def process_path(
                     else:
                         log_message(f"[{filename}] {log_msg}")
                 finally:
-                    # 【关键修改 2】无论成功还是失败，都发送完成信号，让进度条往前走
                     send_signal({'status': 'done'})
         
         log_message("\n🎉 Batch processing complete.")
 
-    # ============================
-    #    Single File Processing
-    # ============================
-    else:
-        final_output_path = output_path
-        if os.path.isdir(output_path):
-            base_name = os.path.basename(input_path)
-            file_name, _ = os.path.splitext(base_name)
-            final_output_path = os.path.join(output_path, f"{file_name}{output_ext}")
-        
-        # 单文件也可以看作是 total=1 的批处理，这样进度条能直接满
+    else: # Single file processing
         send_signal({'total_files': 1})
-        
         log_message("⚙️ Processing single file...")
+
+        common_kwargs = {
+            'raw_path': input_path,
+            'exposure': exposure,
+            'lens_correct': lens_correct,
+            'custom_db_path': custom_db_path,
+            'metering_mode': metering_mode,
+            'log_queue': logger_func if hasattr(logger_func, 'put') else None
+        }
+
         try:
-            core.process_image(
-                raw_path=input_path,
-                output_path=final_output_path,
-                log_space=log_space,
-                lut_path=lut_path,
-                exposure=exposure,
-                lens_correct=lens_correct,
-                custom_db_path=custom_db_path,
-                metering_mode=metering_mode,
-                log_queue=logger_func if hasattr(logger_func, 'put') else None
-            )
+            if generate_xmp_profile:
+                # For single file, output_path can be a file base name or a directory
+                if os.path.isdir(output_path):
+                    base_name = os.path.splitext(os.path.basename(input_path))[0]
+                    output_base = os.path.join(output_path, base_name)
+                else:
+                    output_base = os.path.splitext(output_path)[0]
+
+                core.process_with_xmp(
+                    **common_kwargs,
+                    output_path=output_base,
+                    log_space=log_space,
+                    lut_path=lut_path,
+                )
+            elif generate_tiff_only:
+                if os.path.isdir(output_path):
+                    base_name = os.path.splitext(os.path.basename(input_path))[0]
+                    final_output_path = os.path.join(output_path, f"{base_name}.tif")
+                else:
+                    final_output_path = f"{os.path.splitext(output_path)[0]}.tif"
+                
+                core.generate_prophoto_tiff(
+                    **common_kwargs,
+                    output_path=final_output_path,
+                )
+            else:
+                if os.path.isdir(output_path):
+                    base_name = os.path.splitext(os.path.basename(input_path))[0]
+                    final_output_path = os.path.join(output_path, f"{base_name}.{output_format}")
+                else:
+                    final_output_path = output_path
+
+                core.process_image(
+                    **common_kwargs,
+                    output_path=final_output_path,
+                    log_space=log_space,
+                    lut_path=lut_path,
+                )
         finally:
-            # 发送完成信号
             send_signal({'status': 'done'})
-            
-        log_message("\n🎉 Single file processing complete.")
+            log_message("\n🎉 Single file processing complete.")

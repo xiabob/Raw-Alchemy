@@ -11,48 +11,81 @@ from typing import Optional
 # 尝试导入同级目录下的 utils，如果失败则尝试绝对导入 (方便不同运行环境调试)
 try:
     from . import utils
+    from . import xmp_generator
+    from .constants import LOG_ENCODING_MAP, LOG_TO_WORKING_SPACE, METERING_MODES
 except ImportError:
     import utils
-
-# ==========================================
-#              1. 常量定义 & 映射表
-# ==========================================
-
-# 映射：Log 空间名称 -> 对应的线性色域 (Linear Gamut)
-LOG_TO_WORKING_SPACE = {
-    'F-Log': 'F-Gamut',
-    'F-Log2': 'F-Gamut',
-    'F-Log2C': 'F-Gamut C',
-    'V-Log': 'V-Gamut',
-    'N-Log': 'N-Gamut',
-    'L-Log': 'ITU-R BT.2020',
-    'Canon Log 2': 'Cinema Gamut',
-    'Canon Log 3': 'Cinema Gamut',
-    'S-Log3': 'S-Gamut3',
-    'S-Log3.Cine': 'S-Gamut3.Cine',
-    'Arri LogC3': 'ARRI Wide Gamut 3',
-    'Arri LogC4': 'ARRI Wide Gamut 4',
-    'Log3G10': 'REDWideGamutRGB',
-}
-
-# 映射：复合名称 -> colour 库识别的 Log 编码函数名称
-LOG_ENCODING_MAP = {
-    'S-Log3.Cine': 'S-Log3',
-    'F-Log2C': 'F-Log2',
-}
-
-# 测光模式选项
-METERING_MODES = [
-    'average',        # 几何平均 (默认)
-    'center-weighted',# 中央重点
-    'highlight-safe', # 高光保护 (ETTR)
-    'hybrid',         # 混合 (平均 + 高光限制)
-    'matrix',         # 矩阵/评价测光
-]
+    import xmp_generator
+    from constants import LOG_ENCODING_MAP, LOG_TO_WORKING_SPACE, METERING_MODES
 
 # ==========================================
 #              2. 核心处理函数
 # ==========================================
+
+def _decode_and_prepare_raw(
+    raw_path: str,
+    exposure: Optional[float],
+    metering_mode: str,
+    lens_correct: bool,
+    custom_db_path: Optional[str],
+    _log: callable
+):
+    """
+    Internal function to handle RAW decoding, exposure, and lens correction.
+    This is the common base for all processing pipelines.
+    Returns a float32 numpy array in ProPhoto RGB linear space.
+    """
+    _log(f"  🔹 [Step 1] Decoding RAW...")
+    with rawpy.imread(raw_path) as raw:
+        exif_data = utils.extract_lens_exif(raw, logger=_log)
+        prophoto_linear = raw.postprocess(
+            gamma=(1, 1),
+            no_auto_bright=True,
+            use_camera_wb=True,
+            output_bps=16,
+            output_color=rawpy.ColorSpace.ProPhoto,
+            bright=1.0,
+            highlight_mode=2,
+            demosaic_algorithm=rawpy.DemosaicAlgorithm.AAHD,
+        )
+        img = prophoto_linear.astype(np.float32) / 65535.0
+        del prophoto_linear
+        gc.collect()
+
+    source_cs = colour.RGB_COLOURSPACES['ProPhoto RGB']
+
+    # --- Step 2: 曝光控制 ---
+    if exposure is not None:
+        _log(f"  🔹 [Step 2] Manual Exposure Override ({exposure:+.2f} stops)")
+        gain = 2.0 ** exposure
+        utils.apply_gain_inplace(img, gain)
+    else:
+        _log(f"  🔹 [Step 2] Auto Exposure ({metering_mode})")
+        if metering_mode == 'center-weighted':
+            img = utils.auto_expose_center_weighted(img, source_cs, target_gray=0.18, logger=_log)
+        elif metering_mode == 'highlight-safe':
+            img = utils.auto_expose_highlight_safe(img, clip_threshold=1.0, logger=_log)
+        elif metering_mode == 'average':
+            img = utils.auto_expose_linear(img, source_cs, target_gray=0.18, logger=_log)
+        elif metering_mode == 'matrix':
+            img = utils.auto_expose_matrix(img, source_cs, target_gray=0.18, logger=_log)
+        else: # hybrid as default
+            img = utils.auto_expose_hybrid(img, source_cs, target_gray=0.18, logger=_log)
+
+    # --- Step 3: 镜头校正 ---
+    if lens_correct:
+        _log("  🔹 [Step 3] Applying Lens Correction...")
+        img = utils.apply_lens_correction(
+            img,
+            exif_data=exif_data,
+            custom_db_path=custom_db_path,
+            logger=_log
+        )
+    else:
+        _log("  🔹 [Step 3] Skipping Lens Correction.")
+    
+    return img
+
 
 def process_image(
     raw_path: str,
@@ -66,80 +99,19 @@ def process_image(
     log_queue: Optional[object] = None, # 多进程通信队列
 ):
     filename = os.path.basename(raw_path)
-
-    # 内部日志辅助函数
     def _log(message):
-        if log_queue:
-            # 发送结构化日志：{'id':文件名, 'msg':消息}
-            # 注意：如果是 Queue 对象，使用 .put()
-            if hasattr(log_queue, 'put'):
-                log_queue.put({'id': filename, 'msg': message})
-            else:
-                # 兼容 CLI 模式传入 print 函数的情况
-                print(f"[{filename}] {message}")
+        log_msg = {'id': filename, 'msg': message}
+        if log_queue and hasattr(log_queue, 'put'):
+            log_queue.put(log_msg)
         else:
-            print(f"[{filename}] {message}")
+            print(f"[{log_msg['id']}] {log_msg['msg']}")
 
-    _log(f"🧪 [Raw Alchemy] Processing: {raw_path}")
+    _log(f"🧪 [Full Process] Processing: {raw_path}")
 
-    # --- Step 1: 解码 RAW (统一至 ProPhoto RGB / 16-bit Linear) ---
-    _log(f"  🔹 [Step 1] Decoding RAW...")
-    with rawpy.imread(raw_path) as raw:
-        # 提取 EXIF (用于镜头校正)
-        exif_data = utils.extract_lens_exif(raw, logger=_log)
-
-        # 解码: 必须使用 16-bit 以保留 Log 转换所需的动态范围
-        prophoto_linear = raw.postprocess(
-            gamma=(1, 1),
-            no_auto_bright=True,
-            use_camera_wb=True,
-            output_bps=16,
-            output_color=rawpy.ColorSpace.ProPhoto,
-            bright=1.0,
-            highlight_mode=2, # 2=Blend (防止高光死白)
-            demosaic_algorithm=rawpy.DemosaicAlgorithm.AAHD,
-        )
-        # 转为 Float32 (0.0 - 1.0) 进行数学运算
-        img = prophoto_linear.astype(np.float32) / 65535.0
-        
-        # 立即释放内存
-        del prophoto_linear 
-        gc.collect()
-
-    source_cs = colour.RGB_COLOURSPACES['ProPhoto RGB']
-
-    # --- Step 2: 曝光控制 ---
-    gain = 1.0
-    if exposure is not None:
-        # 路径 A: 手动曝光
-        _log(f"  🔹 [Step 2] Manual Exposure Override ({exposure:+.2f} stops)")
-        gain = 2.0 ** exposure
-        utils.apply_gain_inplace(img, gain)
-    else:
-        # 路径 B: 自动测光
-        _log(f"  🔹 [Step 2] Auto Exposure ({metering_mode})")
-        if metering_mode == 'center-weighted':
-            img = utils.auto_expose_center_weighted(img, source_cs, target_gray=0.18, logger=_log)
-        elif metering_mode == 'highlight-safe':
-            img = utils.auto_expose_highlight_safe(img, clip_threshold=1.0, logger=_log)
-        elif metering_mode == 'average':
-            img = utils.auto_expose_linear(img, source_cs, target_gray=0.18, logger=_log)
-        elif metering_mode == 'matrix':
-            img = utils.auto_expose_matrix(img, source_cs, target_gray=0.18, logger=_log)
-        else: # hybrid as default
-            img = utils.auto_expose_hybrid(img, source_cs, target_gray=0.18, logger=_log)
-
-    # --- Step 3: 镜头校正 & 风格化 ---
-    if lens_correct:
-        _log("  🔹 [Step 3] Applying Lens Correction...")
-        img = utils.apply_lens_correction(
-            img,
-            exif_data=exif_data,
-            custom_db_path=custom_db_path,
-            logger=_log
-        )
-    else:
-        _log("  🔹 [Step 3] Skipping Lens Correction.")
+    # --- Steps 1-3: Decode, Expose, Correct ---
+    img = _decode_and_prepare_raw(
+        raw_path, exposure, metering_mode, lens_correct, custom_db_path, _log
+    )
 
     # 稍微增加饱和度和对比度，为 LUT 转换打底
     _log("  🔹 [Step 3.5] Applying Camera-Match Boost...")
@@ -256,3 +228,127 @@ def process_image(
     if output_image_uint16 is not None:
         del output_image_uint16
     gc.collect()
+
+
+def generate_prophoto_tiff(
+    raw_path: str,
+    output_path: str, # Should be a .tif path
+    exposure: Optional[float] = None,
+    lens_correct: bool = True,
+    metering_mode: str = 'hybrid',
+    custom_db_path: Optional[str] = None,
+    log_queue: Optional[object] = None,
+):
+    """
+    Decodes a RAW file to a 16-bit linear ProPhoto RGB TIFF.
+    This is a simplified pipeline for generating a "digital negative".
+    """
+    filename = os.path.basename(raw_path)
+    def _log(message):
+        log_msg = {'id': filename, 'msg': message}
+        if log_queue and hasattr(log_queue, 'put'):
+            log_queue.put(log_msg)
+        else:
+            print(f"[{log_msg['id']}] {log_msg['msg']}")
+
+    _log(f"🧪 [ProPhoto TIFF] Generating for: {raw_path}")
+
+    # --- Steps 1-3: Decode, Expose, Correct ---
+    img = _decode_and_prepare_raw(
+        raw_path, exposure, metering_mode, lens_correct, custom_db_path, _log
+    )
+
+    # --- Step 4: Save as 16-bit TIFF ---
+    _log(f"  💾 Saving ProPhoto TIFF to {os.path.basename(output_path)}...")
+    try:
+        # Clip to [0, 1] range before converting to uint16
+        np.clip(img, 0.0, 1.0, out=img)
+        output_image_uint16 = (img * 65535).astype(np.uint16)
+        
+        tifffile.imwrite(
+            output_path,
+            output_image_uint16,
+            photometric='rgb',
+            compression='zlib',
+            predictor=2,
+            compressionargs={'level': 8}
+        )
+        _log(f"  ✅ Saved: {output_path}")
+
+    except Exception as e:
+        _log(f"  ❌ [Error] Failed to save TIFF file: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        del img
+        if 'output_image_uint16' in locals():
+            del output_image_uint16
+        gc.collect()
+
+
+def process_with_xmp(
+    raw_path: str,
+    output_path: str, # Base path for .tif and .xmp
+    log_space: str,
+    lut_path: str,
+    exposure: Optional[float] = None,
+    lens_correct: bool = True,
+    metering_mode: str = 'hybrid',
+    custom_db_path: Optional[str] = None,
+    log_queue: Optional[object] = None,
+):
+    """
+    Generates a ProPhoto TIFF and a corresponding XMP sidecar file.
+    """
+    filename = os.path.basename(raw_path)
+    def _log(message):
+        log_msg = {'id': filename, 'msg': message}
+        if log_queue and hasattr(log_queue, 'put'):
+            log_queue.put(log_msg)
+        else:
+            print(f"[{log_msg['id']}] {log_msg['msg']}")
+
+    # Define paths. The output_path is a base, e.g. /path/image (no ext)
+    tiff_path = f"{output_path}.tif"
+    xmp_path = f"{output_path}.xmp"
+    
+    # --- Step 1: Generate the ProPhoto TIFF ---
+    _log("  ▶️  Generating ProPhoto TIFF as base...")
+    # We can reuse the dedicated function for this
+    generate_prophoto_tiff(
+        raw_path=raw_path,
+        output_path=tiff_path,
+        exposure=exposure,
+        lens_correct=lens_correct,
+        metering_mode=metering_mode,
+        custom_db_path=custom_db_path,
+        log_queue=log_queue,
+    )
+
+    # --- Step 2: Generate and save the XMP profile ---
+    if not lut_path:
+        _log("  ⚠️ Skipping XMP generation: No LUT file provided.")
+        return
+
+    _log(f"  ▶️  Generating XMP Profile for {log_space}...")
+    try:
+        # The profile name should be user-friendly
+        profile_name = f"RA - {log_space} - {os.path.basename(os.path.splitext(lut_path)[0])}"
+        
+        xmp_content = xmp_generator.create_xmp_profile(
+            profile_name=profile_name,
+            log_space=log_space,
+            lut_path=lut_path,
+        )
+        
+        with open(xmp_path, 'w', encoding='utf-8') as f:
+            f.write(xmp_content)
+        
+        _log(f"  ✅ Saved XMP Profile: {xmp_path}")
+
+    except NameError:
+        _log(f"  ❌ [Error] Failed to generate XMP: `xmp_generator` module not available.")
+    except Exception as e:
+        _log(f"  ❌ [Error] Failed to generate XMP profile: {e}")
+        import traceback
+        traceback.print_exc()

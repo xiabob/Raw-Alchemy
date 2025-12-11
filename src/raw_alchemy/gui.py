@@ -10,6 +10,7 @@ import time
 # 假设 core 和 orchestrator 在 raw_alchemy 包中
 from raw_alchemy import core, orchestrator
 from raw_alchemy.orchestrator import SUPPORTED_RAW_EXTENSIONS
+from raw_alchemy.xmp_tool_gui import XMPToolWindow
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -46,9 +47,21 @@ class GuiApplication(tk.Frame):
         self.gui_queue = queue.Queue()
         
         self.create_widgets()
+        self.create_menu()
         
         # Start the GUI update loop
         self.master.after(100, self.process_gui_queue)
+
+    def create_menu(self):
+        menubar = tk.Menu(self.master)
+        self.master.config(menu=menubar)
+
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="XMP Profile Generator...", command=self.open_xmp_tool)
+
+    def open_xmp_tool(self):
+        XMPToolWindow(self.master)
 
     def create_widgets(self):
         # --- Frame for IO ---
@@ -78,7 +91,8 @@ class GuiApplication(tk.Frame):
         # Output Format
         ttk.Label(io_frame, text="Output Format:").grid(row=2, column=0, sticky="w", pady=5)
         self.output_format_var = tk.StringVar(value='tif')
-        ttk.OptionMenu(io_frame, self.output_format_var, 'tif', 'tif', 'heif', 'jpg').grid(row=2, column=1, sticky="w", padx=5)
+        self.output_format_menu = ttk.OptionMenu(io_frame, self.output_format_var, 'tif', 'tif', 'heif', 'jpg')
+        self.output_format_menu.grid(row=2, column=1, sticky="w", padx=5)
         self.output_format_var.trace_add("write", self.on_output_format_change)
         
         io_frame.columnconfigure(1, weight=1)
@@ -90,13 +104,17 @@ class GuiApplication(tk.Frame):
         # Row 0: Log Space
         ttk.Label(settings_frame, text="Log Space:").grid(row=0, column=0, sticky="w", pady=5)
         self.log_space_var = tk.StringVar(value=list(core.LOG_TO_WORKING_SPACE.keys())[0])
-        ttk.OptionMenu(settings_frame, self.log_space_var, self.log_space_var.get(), *core.LOG_TO_WORKING_SPACE.keys()).grid(row=0, column=1, sticky="w", padx=5)
+        self.log_space_menu = ttk.OptionMenu(settings_frame, self.log_space_var, self.log_space_var.get(), *core.LOG_TO_WORKING_SPACE.keys())
+        self.log_space_menu.grid(row=0, column=1, sticky="w", padx=5)
 
         # Row 1: LUT
-        ttk.Label(settings_frame, text="LUT (.cube):").grid(row=1, column=0, sticky="w", pady=5)
+        self.lut_label = ttk.Label(settings_frame, text="LUT (.cube):")
+        self.lut_label.grid(row=1, column=0, sticky="w", pady=5)
         self.lut_path_var = tk.StringVar()
-        ttk.Entry(settings_frame, textvariable=self.lut_path_var).grid(row=1, column=1, columnspan=2, sticky="ew", padx=5)
-        ttk.Button(settings_frame, text="Browse...", command=self.browse_lut).grid(row=1, column=3, sticky="ew", padx=5)
+        self.lut_entry = ttk.Entry(settings_frame, textvariable=self.lut_path_var)
+        self.lut_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5)
+        self.lut_button = ttk.Button(settings_frame, text="Browse...", command=self.browse_lut)
+        self.lut_button.grid(row=1, column=3, sticky="ew", padx=5)
 
         # Row 2: CPU Jobs
         ttk.Label(settings_frame, text="CPU Threads:").grid(row=2, column=0, sticky="w", pady=5)
@@ -105,6 +123,19 @@ class GuiApplication(tk.Frame):
 
         settings_frame.columnconfigure(1, weight=1)
         settings_frame.columnconfigure(2, weight=1)
+
+        # --- Frame for Advanced Output ---
+        adv_output_frame = ttk.LabelFrame(self, text="Advanced Output Modes", padding=(10, 5))
+        adv_output_frame.pack(padx=10, pady=5, fill="x")
+
+        self.generate_xmp_var = tk.BooleanVar(value=False)
+        self.generate_tiff_only_var = tk.BooleanVar(value=False)
+
+        self.xmp_check = ttk.Checkbutton(adv_output_frame, text="Generate ProPhoto TIFF + XMP Profile (requires LUT)", variable=self.generate_xmp_var, command=lambda: self.toggle_advanced_output('xmp'))
+        self.xmp_check.grid(row=0, column=0, sticky="w", pady=2)
+        
+        self.tiff_only_check = ttk.Checkbutton(adv_output_frame, text="Generate ProPhoto TIFF only (ignores Log/LUT)", variable=self.generate_tiff_only_var, command=lambda: self.toggle_advanced_output('tiff_only'))
+        self.tiff_only_check.grid(row=1, column=0, sticky="w", pady=2)
 
         # --- Frame for Lens Correction ---
         lens_frame = ttk.LabelFrame(self, text="Lens Correction", padding=(10, 5))
@@ -187,6 +218,27 @@ class GuiApplication(tk.Frame):
 
         self.start_button = ttk.Button(action_frame, text="Start Processing", command=self.start_processing_thread)
         self.start_button.pack(side="right")
+
+    def toggle_advanced_output(self, mode):
+        # Mutual exclusion logic
+        if mode == 'xmp' and self.generate_xmp_var.get():
+            self.generate_tiff_only_var.set(False)
+        elif mode == 'tiff_only' and self.generate_tiff_only_var.get():
+            self.generate_xmp_var.set(False)
+        
+        # Enable/disable other controls
+        is_advanced_mode = self.generate_xmp_var.get() or self.generate_tiff_only_var.get()
+        
+        # Disable standard output format dropdown using direct reference
+        self.output_format_menu.configure(state="disabled" if is_advanced_mode else "normal")
+
+        # Disable Log/LUT if only generating TIFF
+        is_tiff_only_mode = self.generate_tiff_only_var.get()
+        log_lut_state = "disabled" if is_tiff_only_mode else "normal"
+        self.log_space_menu.configure(state=log_lut_state)
+        self.lut_label.configure(state=log_lut_state)
+        self.lut_entry.configure(state=log_lut_state)
+        self.lut_button.configure(state=log_lut_state)
 
     def on_output_format_change(self, *args):
         # 只有当输出路径是文件（有扩展名）时才自动替换扩展名
@@ -327,7 +379,9 @@ class GuiApplication(tk.Frame):
             'lut_path': self.lut_path_var.get() or None,
             'custom_db_path': self.custom_lensfun_db_path_var.get() or None,
             'jobs': self.jobs_var.get(),
-            'lens_correct': self.lens_correction_var.get()
+            'lens_correct': self.lens_correction_var.get(),
+            'generate_xmp_profile': self.generate_xmp_var.get(),
+            'generate_tiff_only': self.generate_tiff_only_var.get(),
         }
         
         if self.exposure_mode_var.get() == "Manual":
