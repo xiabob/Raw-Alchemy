@@ -1,159 +1,364 @@
 # -*- coding: utf-8 -*-
 """
-Module for generating Adobe Camera Raw (ACR) XMP profiles.
+Adobe XMP Profile Generator (Full Feature)
 
-This module is responsible for creating .xmp files that can be used as color profiles
-in Adobe Lightroom and Photoshop (via ACR). The goal is to embed a color transformation
-pipeline (ProPhoto RGB -> Target Log Space -> User LUT) into the profile.
+Features:
+1. Color Space Transform (Linear ProPhoto -> Target Log -> User LUT).
+2. Tetrahedral Interpolation for high-quality resizing.
+3. Adobe RGBTable Binary Format (Delta Encoded, Zlib Compressed, Base85).
+4. Full range amount slider (0-200%).
 
-Note: The structure of XMP profiles, especially those with embedded 3D LUTs (`LookTable`),
-is complex and not fully documented publicly. The initial implementation provides a
-template, and further research or reverse-engineering might be needed to achieve a
-fully functional LUT embedding.
+Dependencies: pip install colour-science numpy
 """
 
 import base64
-import gzip
-import os
+import hashlib
+import struct
+import time
 import uuid
+import zlib
+from io import BytesIO
 
-import colour as cs
 import numpy as np
-from colour.io.luts import LUT3D, read_LUT
+import colour
 
-try:
-    from .constants import LOG_ENCODING_MAP, LOG_TO_WORKING_SPACE
-except ImportError:
-    from constants import LOG_ENCODING_MAP, LOG_TO_WORKING_SPACE
+# --- Constants & Mappings ---
 
+# Adobe Custom Base85 Characters
+ADOBE_Z85_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?`'|()[]{}@%$#"
 
-def generate_look_table_data(lut_path: str, log_space: str) -> str:
-    """
-    Generates the gzipped and Base64 encoded LookTable data with accurate CST.
+# Mapping Log formats to their Gamuts and Transfer Functions in colour-science
+# Format: 'LogName': ('GamutName', 'TransferFunctionName')
+LOG_MAP = {
+    'S-Log3': ('S-Gamut3', 'S-Log3'),
+    'S-Log2': ('S-Gamut', 'S-Log2'),
+    'V-Log':  ('V-Gamut', 'V-Log'),
+    'LogC3':  ('ALEXA Wide Gamut', 'ALEXA Log C'),
+    'LogC4':  ('ARRI Wide Gamut 4', 'ARRI LogC4'),
+    'C-Log3': ('Cinema Gamut', 'Canon Log 3'),
+    'N-Log':  ('N-Gamut', 'N-Log'),
+    # Add more as needed
+}
 
-    This is the core logic:
-    1. Load the user's .cube LUT to determine its size.
-    2. Create an identity LUT of the same size in ProPhoto RGB.
-    3. **[CST] Convert gamut from ProPhoto to the target Log's working space (e.g., V-Gamut).**
-    4. **[CST] Apply the Log transfer function (e.g., V-Log) to the gamut-converted LUT.**
-    5. Apply the user's creative LUT to the fully transformed LUT.
-    6. Convert the final float LUT to 16-bit unsigned integers.
-    7. Gzip and Base64 encode the data.
-    """
-    # 1. Load the user's creative LUT to determine its size
-    try:
-        user_lut = read_LUT(lut_path)
-        user_lut.table = user_lut.table.astype(np.float32)
-        lut_size = user_lut.size
-    except Exception as e:
-        raise IOError(f"Failed to read or parse LUT file: {lut_path}") from e
+# --- Core Logic ---
 
-    # 2. Create an identity LUT of the same size in ProPhoto linear.
-    identity_lut = LUT3D.linear_table(lut_size)
+def adobe_base85_encode(data: bytes) -> str:
+    """Encodes binary data into Adobe's custom Base85 format."""
+    length = len(data)
+    encoded_chars = []
     
-    # 3. Perform Gamut Conversion (ProPhoto -> Target Gamut)
-    target_gamut_name = LOG_TO_WORKING_SPACE.get(log_space)
-    if not target_gamut_name:
-        raise ValueError(f"No working space defined for log space: '{log_space}'")
+    for i in range(0, length, 4):
+        chunk = data[i : i + 4]
+        if len(chunk) < 4:
+            chunk = chunk + b'\x00' * (4 - len(chunk))
+        
+        val = struct.unpack('<I', chunk)[0]
+        
+        # DNG SDK Logic: val / 85 ... output in reverse modulus order
+        # Actually DNG outputs: c1, c2, c3, c4, c5 where c1 is val % 85
+        for _ in range(5):
+            encoded_chars.append(ADOBE_Z85_CHARS[val % 85])
+            val //= 85
+            
+    if length % 4 == 0:
+        return "".join(encoded_chars)
+    else:
+        # Padding logic matching DNG SDK
+        rem = length % 4
+        # 1 byte -> 2 chars, 2 bytes -> 3 chars, 3 bytes -> 4 chars
+        needed_chars = (len(data) // 4) * 5 + (rem + 1)
+        return "".join(encoded_chars[:needed_chars])
 
-    source_cs = cs.RGB_COLOURSPACES['ProPhoto RGB']
-    target_cs = cs.RGB_COLOURSPACES.get(target_gamut_name)
-    if not target_cs:
-        raise ValueError(f"Unsupported or unknown gamut in colour-science: '{target_gamut_name}'")
+def int_round(arr):
+    """Matches C++ int_round: floor(n + 0.5)"""
+    return np.floor(arr + 0.5).astype(np.int32)
 
-    # Calculate and apply the conversion matrix
-    matrix = cs.matrix_RGB_to_RGB(source_cs, target_cs)
-    gamut_converted_table = cs.dot_vector(matrix, identity_lut.table)
+def tetrahedral_resample(data, input_size, output_size):
+    """
+    Performs Tetrahedral Interpolation on a 3D LUT (numpy array).
+    data shape: (B, G, R, 3) or (Z, Y, X, 3)
+    """
+    if input_size == output_size:
+        return data
 
-    # 4. Get and apply the Log transfer function
-    log_curve_name = LOG_ENCODING_MAP.get(log_space, log_space)
-    log_cctf = cs.CCTF_ENCODINGS.get(log_curve_name)
-    if not log_cctf:
-        raise ValueError(
-            f"Unsupported or unknown log curve: '{log_space}' (resolved to '{log_curve_name}')"
+    ratio = (input_size - 1.0) / (output_size - 1.0)
+    
+    # Generate output grid coordinates (0..output_size-1)
+    grid = np.arange(output_size, dtype=np.float64)
+    # Create 3D mesh: Z(Blue), Y(Green), X(Red)
+    zz, yy, xx = np.meshgrid(grid, grid, grid, indexing='ij')
+    
+    # Map to input coordinates
+    bs = zz * ratio
+    gs = yy * ratio
+    rs = xx * ratio
+
+    # Lower bounds
+    lb = np.clip(np.floor(bs).astype(np.int32), 0, input_size - 1)
+    lg = np.clip(np.floor(gs).astype(np.int32), 0, input_size - 1)
+    lr = np.clip(np.floor(rs).astype(np.int32), 0, input_size - 1)
+
+    # Upper bounds
+    ub = np.clip(lb + 1, 0, input_size - 1)
+    ug = np.clip(lg + 1, 0, input_size - 1)
+    ur = np.clip(lr + 1, 0, input_size - 1)
+
+    # Fractions
+    fb = bs - lb
+    fg = gs - lg
+    fr = rs - lr
+
+    # Helper for readability
+    def get(z, y, x): return data[z, y, x]
+
+    # 8 Corners
+    c000 = get(lb, lg, lr); c100 = get(ub, lg, lr) # Note: ub is axis 0 (Blue) change
+    c010 = get(lb, ug, lr); c110 = get(ub, ug, lr)
+    c001 = get(lb, lg, ur); c101 = get(ub, lg, ur) # ur is axis 2 (Red) change
+    c011 = get(lb, ug, ur); c111 = get(ub, ug, ur)
+
+    # Note on axes: Since input `data` is (B, G, R), 
+    # fb corresponds to axis 0, fg to axis 1, fr to axis 2.
+    f0, f1, f2 = fb[..., None], fg[..., None], fr[..., None]
+    
+    # Tetrahedral Logic (6 cases)
+    # 1. f0 >= f1 >= f2 (Blue >= Green >= Red)
+    mask = (f0 >= f1) & (f1 >= f2); m = mask[..., None]
+    out = m * ((1-f0)*c000 + (f0-f1)*c100 + (f1-f2)*c110 + f2*c111)
+    
+    # 2. f0 > f2 > f1
+    mask = (f0 > f2) & (f2 > f1); m = mask[..., None]
+    out += m * ((1-f0)*c000 + (f0-f2)*c100 + (f2-f1)*c101 + f1*c111)
+    
+    # 3. f2 > f0 > f1
+    mask = (f2 > f0) & (f0 > f1); m = mask[..., None]
+    out += m * ((1-f2)*c000 + (f2-f0)*c001 + (f0-f1)*c101 + f1*c111)
+    
+    # 4. f2 > f1 >= f0
+    mask = (f2 > f1) & (f1 >= f0); m = mask[..., None]
+    out += m * ((1-f2)*c000 + (f2-f1)*c001 + (f1-f0)*c011 + f0*c111)
+    
+    # 5. f1 >= f2 > f0
+    mask = (f1 >= f2) & (f2 > f0); m = mask[..., None]
+    out += m * ((1-f1)*c000 + (f1-f2)*c010 + (f2-f0)*c011 + f0*c111)
+    
+    # 6. f1 > f0 >= f2
+    mask = (f1 > f0) & (f0 >= f2); m = mask[..., None]
+    out += m * ((1-f1)*c000 + (f1-f0)*c010 + (f0-f2)*c110 + f2*c111)
+
+    return out
+
+def apply_cst_pipeline(user_lut_path, log_space, output_size=32):
+    """
+    Loads user LUT, creates ProPhoto Identity, transforms to Log, applies LUT.
+    Returns: (output_size, final_data_numpy)
+    """
+    print(f"Processing: Reading {user_lut_path}...")
+    user_lut = colour.read_LUT(user_lut_path)
+    # Ensure standard (B, G, R, 3) shape for 3D LUTs
+    # colour-science reads .cube as (Size, Size, Size, 3) usually.
+    
+    # 1. Create Identity Grid in Linear ProPhoto RGB (ACR Working Space)
+    # We create it directly at the target output size to avoid resizing later if possible
+    # But for accuracy, we usually want to process at the LUT's native size then downsample, 
+    # OR create identity at 32x32x32 directly. 
+    # ACR standard is 32 (or 33). Let's use 32 directly for the grid.
+    
+    domain = np.linspace(0, 1, output_size)
+    # Grid shape: (B, G, R, 3) -> (32, 32, 32, 3)
+    # Note: meshgrid indexing 'ij' gives Z, Y, X order
+    B, G, R = np.meshgrid(domain, domain, domain, indexing='ij')
+    prophoto_linear = np.stack([R, G, B], axis=-1) # Stack as RGB for color math
+    
+    if log_space and log_space in LOG_MAP:
+        gamut_name, curve_name = LOG_MAP[log_space]
+        print(f"  - Pipeline: ProPhoto Linear -> {gamut_name} -> {curve_name} -> LUT")
+        
+        # A. Gamut Transform: ProPhoto RGB -> Target Gamut (Linear)
+        matrix = colour.matrix_RGB_to_RGB(
+            colour.RGB_COLOURSPACES['ProPhoto RGB'],
+            colour.RGB_COLOURSPACES[gamut_name]
         )
+        # Apply matrix (dot product on last axis)
+        target_gamut_linear = np.einsum('...ij,...j->...i', matrix, prophoto_linear)
+        
+        # B. Transfer Function: Linear -> Log
+        log_encoded = colour.cctf_encoding(target_gamut_linear, function=curve_name)
+        
+        # C. Apply User LUT
+        # Since our grid is 32x32x32 but user LUT might be 33x33x33 or 65x65x65,
+        # we interpolate the user LUT at the log_encoded coordinates.
+        print(f"  - Applying User LUT ({user_lut.size}^3) to grid...")
+        final_rgb = user_lut.apply(log_encoded, interpolator=colour.algebra.table_interpolation_tetrahedral)
+        
+    else:
+        print("  - No Log space defined or found. Passing through.")
+        # If no CST, we effectively just resize the user LUT to 32x32x32
+        # We can use the tetrahedral resample function on the raw LUT data
+        # Be careful about dimension ordering from colour-science
+        return output_size, tetrahedral_resample(user_lut.table, user_lut.size, output_size)
+
+    # If CST was applied, final_rgb is already at output_size
+    # But colour-science apply returns (R,G,B) order usually if input was (R,G,B).
+    # Our prophoto_linear input was stacked [R,G,B].
+    # However, for the binary packing loop later, we need specific ordering.
+    # dng_rgb_table expects loops: R(outer), G, B(inner).
+    # In numpy shape (B, G, R, 3), axis 0 is B, 1 is G, 2 is R.
+    # We will transpose later.
     
-    # Apply curve to the *gamut-converted* table
-    log_encoded_lut_table = log_cctf(gamut_converted_table)
+    # Input ProPhoto grid was constructed as [R, G, B] channels.
+    # B, G, R meshgrid -> prophoto_linear[b, g, r] = [r_val, g_val, b_val]
+    # So final_rgb[b, g, r] = [r_out, g_out, b_out]
+    
+    return output_size, final_rgb
 
-    # 5. Apply the user's LUT to the log-encoded LUT data
-    final_lut_table = user_lut.apply(
-        log_encoded_lut_table, interpolator=cs.interpolate.interp_trilinear
-    )
-
-    # 6. Clip, reorder channels to BGR, and convert to 16-bit unsigned integers
-    final_lut_table = np.clip(final_lut_table, 0.0, 1.0)
-    final_lut_table_bgr = final_lut_table[..., ::-1].copy()
-    lut_data_uint16 = (final_lut_table_bgr * 65535).astype(np.uint16)
-
-    # 7. Gzip and Base64 encode
-    compressed_data = gzip.compress(lut_data_uint16.tobytes())
-    encoded_data = base64.b64encode(compressed_data).decode("utf-8")
-
-    return encoded_data
-
-
-def create_xmp_profile(
-    profile_name: str,
-    log_space: str,
-    lut_path: str,
-) -> str:
+def generate_rgb_table_stream(data, size, min_amt=0, max_amt=200):
     """
-    Generates the XML content for an XMP color profile.
-
-    This function creates an XMP profile that applies a specific look, which is
-    intended to be the combination of a Log conversion and a LUT application.
-
-    Args:
-        profile_name: The display name for the profile in Lightroom/ACR.
-        log_space: The target Log colorspace (e.g., 'S-Log3').
-        lut_path: Path to the .cube LUT file.
-
-    Returns:
-        A string containing the full XML content for the .xmp file.
+    Encodes the numpy data into DNG RGBTable binary format.
+    data shape expected: (B, G, R, 3) where last dim is [r_val, g_val, b_val]
     """
-    profile_uuid = str(uuid.uuid4())
+    stream = BytesIO()
+    def write_u32(val): stream.write(struct.pack('<I', val))
+    def write_double(val): stream.write(struct.pack('<d', val))
+    
+    # Header
+    write_u32(1) # btt_RGBTable (MUST BE 1)
+    write_u32(1) # Version
+    write_u32(3) # Dimensions
+    write_u32(size) # Divisions
+    
+    # Data Processing
+    # 1. Clip and Scale
+    data = np.clip(data, 0.0, 1.0)
+    data_u16 = int_round(data * 65535)
+    
+    # 2. Prepare Identity (Nop) Curve
+    indices = np.arange(size, dtype=np.int32)
+    nop_curve = (indices * 0xFFFF + (size >> 1)) // (size - 1)
+    
+    # 3. Prepare Nop Grid matching Data Shape (B, G, R)
+    # axis 0=B, 1=G, 2=R.
+    grid_b, grid_g, grid_r = np.meshgrid(nop_curve, nop_curve, nop_curve, indexing='ij')
+    
+    # 4. Calculate Deltas (Sample - Identity)
+    # Data is [R, G, B] values.
+    # delta_r = val_r - grid_r (where grid_r varies along axis 2)
+    delta_r = data_u16[..., 0] - grid_r
+    delta_g = data_u16[..., 1] - grid_g
+    delta_b = data_u16[..., 2] - grid_b
+    
+    # 5. Reorder for DNG Loop: R(outer), G, B(inner)
+    # Current shape (B, G, R).
+    # We want flattened order equivalent to: for r: for g: for b: write(r,g,b)
+    # So we need to transpose dimensions to (R, G, B) before flattening.
+    # Current axes: 0=B, 1=G, 2=R. Target: 2, 1, 0.
+    delta_r = delta_r.transpose(2, 1, 0)
+    delta_g = delta_g.transpose(2, 1, 0)
+    delta_b = delta_b.transpose(2, 1, 0)
+    
+    # Stack [DeltaR, DeltaG, DeltaB]
+    deltas = np.stack((delta_r, delta_g, delta_b), axis=-1)
+    
+    # Flatten
+    flat_deltas = deltas.flatten().astype(np.uint16)
+    
+    # Write Payload
+    if struct.pack('<H', 1) == b'\x01\x00':
+        stream.write(flat_deltas.tobytes())
+    else:
+        stream.write(flat_deltas.byteswap().tobytes())
+        
+    # Footer
+    write_u32(4) # ProPhoto
+    write_u32(0) # Linear Gamma (Since we baked the curve in)
+    write_u32(1) # Gamut Extend
+    write_double(min_amt * 0.01) # 0.0
+    write_double(max_amt * 0.01) # 2.0
+    
+    return stream.getvalue()
 
+def create_xmp_profile(profile_name, lut_path, log_space=None):
+    """
+    Main Entry Point.
+    """
+    # 1. Generate UUIDs
+    profile_uuid = str(uuid.uuid4()).replace('-', '').upper()
+    
     try:
-        look_table_data = generate_look_table_data(lut_path, log_space)
-    except (ValueError, IOError) as e:
-        print(f"Error generating LookTable: {e}")
-        look_table_data = ""  # Fallback to an empty LookTable on error
+        # 2. Process Color Pipeline & Resizing
+        # Target size 32 is standard for ACR RGBTable
+        size, data = apply_cst_pipeline(lut_path, log_space, output_size=32)
+        
+        # 3. Binary Encoding
+        raw_bytes = generate_rgb_table_stream(data, size, min_amt=0, max_amt=200)
+        
+        # 4. Fingerprinting
+        m = hashlib.md5()
+        m.update(raw_bytes)
+        fingerprint = m.hexdigest().upper()
+        
+        # 5. Compression & ASCII Encoding
+        # 4-byte LE size header
+        header = struct.pack('<I', len(raw_bytes))
+        compressed = zlib.compress(raw_bytes, level=zlib.Z_DEFAULT_COMPRESSION)
+        encoded_data = adobe_base85_encode(header + compressed)
+        
+    except Exception as e:
+        print(f"Error creating profile: {e}")
+        return ""
 
-    xmp_template = f"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 6.0-c001 79.164488, 2021/10/22-12:04:21        ">
+    # 6. XML Generation (Matches testabc.txt)
+    xmp_template = f"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-    xmlns:dc="http://purl.org/dc/elements/1.1/"
-    crs:Version="14.0"
-    crs:ProcessVersion="11.0"
-    crs:WhiteBalance="As Shot"
-    crs:HasSettings="True">
-   <dc:format>image/x-raw</dc:format>
-   <crs:Look>
-    <rdf:Description
-     crs:Name="{profile_name}"
-     crs:Amount="1.000000"
-     crs:UUID="{profile_uuid.upper()}"
-     crs:SupportsAmount="false"
-     crs:SupportsMonochrome="false"
-     crs:SupportsOutputReferred="false">
-     <crs:Group>
-      <rdf:Alt>
-       <rdf:li xml:lang="x-default">Raw Alchemy</rdf:li>
-      </rdf:Alt>
-     </crs:Group>
-     <crs:Parameters>
-      <rdf:Description
-       crs:Version="14.0"
-       crs:ProcessVersion="11.0"
-       crs:ConvertToGrayscale="False"
-       crs:CameraProfile="Adobe Standard"
-       crs:LookTable="{look_table_data}">
-      </rdf:Description>
-     </crs:Parameters>
-    </rdf:Description>
-   </crs:Look>
+   crs:PresetType="Look"
+   crs:Cluster=""
+   crs:UUID="{profile_uuid}"
+   crs:SupportsAmount="True"
+   crs:SupportsColor="True"
+   crs:SupportsMonochrome="True"
+   crs:SupportsHighDynamicRange="True"
+   crs:SupportsNormalDynamicRange="True"
+   crs:SupportsSceneReferred="True"
+   crs:SupportsOutputReferred="True"
+   crs:RequiresRGBTables="False"
+   crs:ShowInPresets="True"
+   crs:ShowInQuickActions="False"
+   crs:CameraModelRestriction=""
+   crs:Copyright=""
+   crs:ContactInfo=""
+   crs:Version="14.3"
+   crs:ProcessVersion="11.0"
+   crs:ConvertToGrayscale="False"
+   crs:RGBTable="{fingerprint}"
+   crs:Table_{fingerprint}="{encoded_data}"
+   crs:HasSettings="True">
+   <crs:Name>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">{profile_name}</rdf:li>
+    </rdf:Alt>
+   </crs:Name>
+   <crs:ShortName>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default"/>
+    </rdf:Alt>
+   </crs:ShortName>
+   <crs:SortName>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default"/>
+    </rdf:Alt>
+   </crs:SortName>
+   <crs:Group>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">Profiles</rdf:li>
+    </rdf:Alt>
+   </crs:Group>
+   <crs:Description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">Generated by xmp_generator</rdf:li>
+    </rdf:Alt>
+   </crs:Description>
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
