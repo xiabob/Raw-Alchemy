@@ -28,22 +28,23 @@ except ImportError:
     LOG_ENCODING_MAP = {}
     LOG_TO_WORKING_SPACE = {}
 
-# --- Constants & Mappings ---
+# --- Constants ---
 
 # Adobe Custom Base85 Characters (Standard Adobe Order)
 # C++ Source: kEncodeTable
 ADOBE_Z85_CHARS = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?`'|()[]{}@%$#"
 ADOBE_Z85_TABLE = [chr(c) for c in ADOBE_Z85_CHARS]
 
-# --- Core Logic ---
+# --- Helper Functions ---
+
+def int_round(n):
+    """Matches C++ int_round: integer rounding of float."""
+    return np.floor(n + 0.5).astype(np.int32)
 
 def adobe_base85_encode(data: bytes) -> str:
     """
     Encodes binary data into Adobe's custom Base85 format.
-    
-    CRITICAL CHANGE: 
-    Matches XMPconverter.cpp logic which uses Little-Endian reading 
-    and LSB-first character generation (val % 85).
+    Matches XMPconverter.cpp logic: Little-Endian reading, LSB-first char output.
     """
     length = len(data)
     encoded_chars = []
@@ -53,38 +54,36 @@ def adobe_base85_encode(data: bytes) -> str:
         chunk = data[i : i + 4]
         chunk_len = len(chunk)
         
-        # Pad with null bytes if less than 4
+        # C++ logic pads the reading buffer with 0s if we are at the end
         if chunk_len < 4:
             chunk = chunk + b'\x00' * (4 - chunk_len)
         
         # Unpack as Little-Endian Unsigned Int (<I)
-        # C++ does: x = *(sPtr_1_ + i); which is LE on Intel/Windows
+        # C++: x = *(sPtr_1_ + i);
         val = struct.unpack('<I', chunk)[0]
         
-        # Calculate 5 Base85 characters
-        # C++ logic: for (j=0; j<5; ++j, x /= 85) dPtr_2[k++] = kEncodeTable[x % 85];
-        # This outputs the LSB (remainder) first.
-        for _ in range(5):
-            encoded_chars.append(ADOBE_Z85_TABLE[val % 85])
-            val //= 85
+        # Calculate Base85 characters
+        # C++: Loop 5 times, output = table[x % 85], x /= 85
+        # Logic regarding padding:
+        # C++ Loop: if (j > 0 && !--compressedSize_1) break;
+        # This means:
+        # 1 byte input  -> 2 chars output
+        # 2 bytes input -> 3 chars output
+        # 3 bytes input -> 4 chars output
+        # 4 bytes input -> 5 chars output
+        
+        chars_to_write = 5
+        if i + 4 > length:
+            remaining = length - i
+            chars_to_write = remaining + 1
 
-    # Handle padding length correction
-    # If original length is not div by 4, we must output only the needed characters.
-    # 1 byte  -> 2 chars
-    # 2 bytes -> 3 chars
-    # 3 bytes -> 4 chars
-    if length % 4 != 0:
-        rem = length % 4
-        # Calculate how many chars to keep from the last block of 5
-        chars_to_keep = rem + 1
-        # Remove the extra characters from the end
-        encoded_chars = encoded_chars[: -(5 - chars_to_keep)]
+        for j in range(5):
+            if j < chars_to_write:
+                encoded_chars.append(ADOBE_Z85_TABLE[val % 85])
+            val //= 85
 
     return "".join(encoded_chars)
 
-def int_round(arr):
-    """Matches C++ int_round: floor(n + 0.5)"""
-    return np.floor(arr + 0.5).astype(np.int32)
 
 def apply_cst_pipeline(user_lut_path, log_space, output_size=33, _log=print):
     """
@@ -146,91 +145,100 @@ def generate_rgb_table_stream(data, size, min_amt=0, max_amt=200):
     Input data shape MUST be: (R, G, B, 3)
     """
     stream = BytesIO()
+    
+    # Helpers for writing Little Endian
     def write_u32(val): stream.write(struct.pack('<I', val))
     def write_double(val): stream.write(struct.pack('<d', val))
     
-    # Header
-    write_u32(1) # btt_RGBTable
-    write_u32(1) # Version
-    write_u32(3) # Dimensions
-    write_u32(size) # Divisions
+    # --- 1. Header (16 bytes) ---
+    write_u32(1)    # format: btt_RGBTable
+    write_u32(1)    # version
+    write_u32(3)    # dimensions (3D)
+    write_u32(size) # divisions (N)
     
-    # 1. Clip and Scale
+    # --- 2. Data Processing (Deltas) ---
+    
+    # Clip and Scale to 0-65535
     data = np.clip(data, 0.0, 1.0)
-    data_u16 = int_round(data * 65535) # Shape (R, G, B, 3)
+    data_scaled = int_round(data * 65535) # Shape (R, G, B, 3)
     
-    # 2. Prepare Identity Curve
+    # Generate Identity Curve
     indices = np.arange(size, dtype=np.int32)
-    # Standard DNG Identity logic
     nop_curve = (indices * 0xFFFF + (size >> 1)) // (size - 1)
     
-    # 3. Prepare Nop Grid matching Data Shape (R, G, B)
-    # indexing='ij' -> Axis 0=R, 1=G, 2=B.
+    # Create Identity Grid (R, G, B order)
+    # indexing='ij' ensures (Axis0=R, Axis1=G, Axis2=B)
     grid_r, grid_g, grid_b = np.meshgrid(nop_curve, nop_curve, nop_curve, indexing='ij')
     
-    # 4. Calculate Deltas (Value - Identity)
-    delta_r = data_u16[..., 0] - grid_r
-    delta_g = data_u16[..., 1] - grid_g
-    delta_b = data_u16[..., 2] - grid_b
+    # Calculate Deltas (Actual - Identity)
+    # Result is int32, potentially negative
+    delta_r = data_scaled[..., 0] - grid_r
+    delta_g = data_scaled[..., 1] - grid_g
+    delta_b = data_scaled[..., 2] - grid_b
     
-    # 5. Interleave and Flatten
-    # C++ Loop Order: bIndex(outer), gIndex, rIndex(inner).
-    # Memory Layout: This implies Row-Major (C-Style) flattening of an (R, G, B) block matches.
+    # Interleave data: R, G, B, R, G, B...
     # Stack along last axis -> (R, G, B, 3)
     deltas_stacked = np.stack((delta_r, delta_g, delta_b), axis=-1)
     
-    # Flatten to 1D array
-    # Since we are casting to uint16, we need to handle negative values (deltas)
-    # by simulating overflow/cast. 
-    flat_deltas = deltas_stacked.flatten().astype(np.int32)
+    # Flatten: C-order (Row Major) matches the C++ loop nesting of r(inner), g, b(outer)
+    flat_deltas = deltas_stacked.flatten()
     
-    # Convert to 16-bit bytes (Little Endian)
-    # astype('<u2') will interpret the lower 16 bits of the int32, correctly handling negative 2's complement
+    # Cast to uint16 (Little Endian)
+    # This automatically handles the "Delta" logic.
+    # e.g., -1 becomes 65535 (0xFFFF) in 2's complement, which is what 'H' or '<u2' expects for raw bits
     stream.write(flat_deltas.astype('<u2').tobytes())
         
-    # Footer
-    write_u32(0) # sRGB
-    write_u32(1) # sRGB (Gamma)
-    write_u32(0) # Gamut Extend (0=Clip)
+    # --- 3. Footer Integers (12 bytes) ---
+    # C++ Default: Adobe (1, 3), ProPhoto (2, 2), sRGB (0, 1)
+    # Based on XMPconverter.cpp logic
+    colors = 2
+    gamma = 2
+
+    write_u32(colors) # colors
+    write_u32(gamma)  # gamma
+    write_u32(0)      # gamut (0=clip, 1=extend) - defaulting to 0 as per typical use
+    
+    # --- 4. Footer Range (16 bytes) ---
     write_double(min_amt * 0.01)
     write_double(max_amt * 0.01)
     
     return stream.getvalue()
 
 def create_xmp_profile(profile_name, lut_path, log_space=None, _log=print):
+    """
+    Main function to generate the XMP string.
+    """
     profile_uuid = str(uuid.uuid4()).replace('-', '').upper()
-    
-    try:
-        # Standard size for DNG RGBTable is often 32 or 33.
-        size, data = apply_cst_pipeline(lut_path, log_space, output_size=33, _log=_log)
-        
-        # Binary Encoding
-        raw_bytes = generate_rgb_table_stream(data, size, min_amt=0, max_amt=200)
-        
-        # Fingerprinting (MD5 of uncompressed binary)
-        m = hashlib.md5()
-        m.update(raw_bytes)
-        fingerprint = m.hexdigest().upper()
-        
-        # Compression & ASCII Encoding
-        # 1. Prefix with original length (4 bytes Little Endian)
-        # Matches C++: memcpy(dPtr_1, &uncompressedSize_1, 4) -> LE on x86
-        header = struct.pack('<I', len(raw_bytes))
-        
-        # 2. Compress payload
-        compressed = zlib.compress(raw_bytes, level=zlib.Z_BEST_COMPRESSION)
-        
-        # 3. Base85 Encode the whole thing (Header + Compressed Data)
-        encoded_data = adobe_base85_encode(header + compressed)
-        
-    except Exception as e:
-        _log(f"Error creating profile: {e}")
-        import traceback
-        traceback.print_exc()
-        return ""
 
+    # 1. Pipeline (Keep your existing logic here)
+    # Assuming apply_cst_pipeline returns (size, data) where data is (R,G,B,3)
+    size, data = apply_cst_pipeline(lut_path, log_space, output_size=32, _log=_log)
+    
+    # 2. Binary Encoding (Uncompressed)
+    # Note: Usually ProPhoto is the working space for profiles
+    raw_bytes = generate_rgb_table_stream(data, size, min_amt=0, max_amt=200)
+    
+    # 3. Fingerprinting (MD5 of uncompressed binary)
+    m = hashlib.md5()
+    m.update(raw_bytes)
+    fingerprint = m.hexdigest().upper()
+    
+    # 4. Compression (Zlib with Length Prefix)
+    # Matches C++: memcpy(dPtr_1, &uncompressedSize_1, 4);
+    uncompressed_len = len(raw_bytes)
+    header = struct.pack('<I', uncompressed_len)
+    
+    # Matches C++: compress2(...)
+    compressed_payload = zlib.compress(raw_bytes, level=zlib.Z_BEST_COMPRESSION)
+    
+    full_binary_blob = header + compressed_payload
+    
+    # 5. Ascii85 Encoding
+    encoded_data = adobe_base85_encode(full_binary_blob)
+    
+    # 6. XMP Template Assembly
     xmp_template = f"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
    crs:PresetType="Look"
