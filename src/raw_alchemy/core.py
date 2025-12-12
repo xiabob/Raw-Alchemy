@@ -6,6 +6,7 @@ import tifffile
 from PIL import Image
 import pillow_heif
 import os
+import time
 from typing import Optional
 
 from . import utils
@@ -62,6 +63,15 @@ def process_image(
     import os
     filename = os.path.basename(raw_path)
 
+    # Simple timing helper (ms) to mirror Swift/bridge logs
+    t_total = time.perf_counter()
+    t_last = t_total
+    def _t(label: str):
+        nonlocal t_last
+        now = time.perf_counter()
+        print(f"[RawAlchemy][decode] {label}: {(now - t_last) * 1000:.2f} ms")
+        t_last = now
+
     def _log(message):
         if log_queue:
             # 对于 GUI，发送结构化日志以避免混淆
@@ -75,6 +85,7 @@ def process_image(
     # --- Step 1: 统一解码 (优化内存) ---
     _log(f"  🔹 [Step 1] Decoding RAW...")
     with rawpy.imread(raw_path) as raw:
+        _t("open_file")
         # --- Step 1.1: 提取 EXIF ---
         # 在解码前提取，即使解码失败也能获取信息
         exif_data = utils.extract_lens_exif(raw, logger=_log)
@@ -90,7 +101,9 @@ def process_image(
             highlight_mode=2,
             demosaic_algorithm=rawpy.DemosaicAlgorithm.AAHD,
         )
+        _t("postprocess")
         img = prophoto_linear.astype(np.float32) / 65535.0
+        _t("convert_16u_to_float")
         del prophoto_linear # <--- 关键：立即释放巨大的 uint16 数组
         gc.collect()        # <--- 强制回收
 
@@ -265,3 +278,4 @@ def process_image(
         del output_image_uint16
     gc.collect()
     _log("  ✅ Done.")
+    print(f"[RawAlchemy][decode] total: {(time.perf_counter() - t_total) * 1000:.2f} ms")
