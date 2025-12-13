@@ -4,7 +4,7 @@
 
 ---
 
-A Python-based command-line tool for advanced RAW image processing pipelines. It is designed to convert RAW files into a wide-gamut linear space (ProPhoto RGB), apply camera-specific Log curves, and integrate creative LUTs, achieving a complete and color-managed workflow.
+A Python-based tool for advanced RAW image processing pipelines. It is designed to convert RAW files into a wide-gamut linear space (ProPhoto RGB), apply camera-specific Log curves, and integrate creative LUTs, achieving a complete and color-managed workflow.
 
 ### Core Philosophy
 
@@ -108,6 +108,14 @@ You can choose between two modes:
 *   **Auto**: This is the default mode. You can select a **Metering** method from the dropdown (`hybrid`, `average`, etc.) to let the application determine the best exposure automatically.
 *   **Manual**: Select this mode to override auto-exposure. You can then enter a specific EV value in the **EV Stops** box or use the slider to adjust the exposure compensation manually.
 
+The **Metering** dropdown (available in `Auto` mode) lets you choose a strategy for automatic exposure adjustment:
+
+*   **`matrix` (Default)**: An advanced evaluative metering mode. It divides the image into a 7x7 grid, intelligently weighting each zone based on brightness and position. It actively suppresses highlights and boosts shadows, providing the most balanced and reliable exposure for complex scenes.
+*   **`hybrid`**: A simpler, faster intelligent mode. It aims for a balanced average exposure but will automatically reduce brightness to prevent highlights from blowing out.
+*   **`average`**: Calculates the average brightness of the entire scene and adjusts it to middle gray. Best for evenly lit scenes.
+*   **`center-weighted`**: Prioritizes the brightness of the center of the frame. Ideal for portraits or centered subjects.
+*   **`highlight-safe` (ETTR)**: Exposes the image as brightly as possible without clipping highlights. This captures maximum shadow detail but may require lowering exposure in post.
+
 #### 4. Start Processing
 
 *   Click the **Start Processing** button.
@@ -118,7 +126,7 @@ You can choose between two modes:
 
 Raw Alchemy now includes a powerful script to convert and import lens profiles from Adobe's LCP format, which is used by Adobe Camera Raw and DNG Converter. This gives you access to a much larger and more up-to-date lens database.
 
-The conversion script `lensfun-convert-lcp` is bundled with the source code.
+The conversion script, lensfun-convert-lcp-new, can be found at [**Lensfun**](https://github.com/shenmintao/lensfun).
 
 **Steps:**
 
@@ -128,7 +136,7 @@ The conversion script `lensfun-convert-lcp` is bundled with the source code.
     *   **macOS**: `/Library/Application Support/Adobe/CameraRaw/LensProfiles/1.0/`
 
 2.  **Run the conversion script.**
-    The script is located in the `src/raw_alchemy/vendor/lensfun/` directory. You will need Python installed to run it.
+    The script is located in the apps/ directory of the lensfun project. You will need Python installed to run it.
 
     Open your terminal, navigate to the Raw Alchemy project directory, and run the appropriate script for your OS:
 

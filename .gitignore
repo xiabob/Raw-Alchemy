@@ -3,3 +3,4 @@
 /src/raw_alchemy.egg-info/
 /dist/
 __pycache__
+/src/raw_alchemy/vendor/

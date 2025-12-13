@@ -20,8 +20,14 @@ class CustomBuildPy(build_py):
     def get_download_url(self, asset_name):
         """Gets the download URL for a given asset from the latest GitHub release."""
         api_url = "https://api.github.com/repos/shenmintao/lensfun/releases/latest"
+        token = os.environ.get("GITHUB_TOKEN")
+        headers = {}
+        if token:
+            headers["Authorization"] = f"token {token}"
+
+        req = urllib.request.Request(api_url, headers=headers)
         try:
-            with urllib.request.urlopen(api_url) as response:
+            with urllib.request.urlopen(req) as response:
                 data = json.loads(response.read().decode())
                 for asset in data["assets"]:
                     if asset["name"] == asset_name:

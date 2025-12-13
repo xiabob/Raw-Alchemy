@@ -21,20 +21,13 @@ jobs:
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download and Extract Lensfun
-        run: |
-          mkdir -p src/raw_alchemy/vendor/lensfun
-          gh release download --repo shenmintao/lensfun --pattern "lensfun-windows.zip" --output lensfun.zip
-          tar -xf lensfun.zip -C src/raw_alchemy/vendor/lensfun
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install .
         env:
           CMAKE_PREFIX_PATH: ''
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build executable with PyInstaller
         run: pyinstaller RawAlchemy.spec
@@ -57,18 +50,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download and Extract Lensfun
-        run: |
-          mkdir -p src/raw_alchemy/vendor/lensfun
-          gh release download --repo shenmintao/lensfun --pattern "lensfun-linux.tar.gz" --output lensfun.tar.gz
-          tar -xzf lensfun.tar.gz -C src/raw_alchemy/vendor/lensfun
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build executable with PyInstaller
         run: pyinstaller RawAlchemy.spec
@@ -110,18 +97,12 @@ jobs:
           sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
           iconutil -c icns icon.iconset
 
-      - name: Download and Extract Lensfun
-        run: |
-          mkdir -p src/raw_alchemy/vendor/lensfun
-          gh release download --repo shenmintao/lensfun --pattern "lensfun-macos.tar.gz" --output lensfun.tar.gz
-          tar -xzf lensfun.tar.gz -C src/raw_alchemy/vendor/lensfun
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build executable with PyInstaller
         run: pyinstaller RawAlchemy.spec

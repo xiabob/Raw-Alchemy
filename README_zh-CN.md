@@ -4,7 +4,7 @@
 
 ---
 
-一个基于 Python 的命令行工具，用于实现高级 RAW 图像处理流程。它旨在将 RAW 文件转换到广色域线性空间 (ProPhoto RGB)，应用相机特定的 Log 曲线，并集成创意 LUT，以实现一个完整且色彩管理精确的工作流。
+一个基于 Python 的工具，用于实现高级 RAW 图像处理流程。它旨在将 RAW 文件转换到广色域线性空间 (ProPhoto RGB)，应用相机特定的 Log 曲线，并集成创意 LUT，以实现一个完整且色彩管理精确的工作流。
 
 ### 核心理念
 
@@ -54,7 +54,7 @@
 
 对于大多数用户，使用 Raw Alchemy 最简单的方式是下载为您操作系统预编译的可执行文件。这无需安装 Python 或任何依赖。
 
-1.  前往 [**Releases**](https://github.com/shenmintao/raw-alchemy/releases) 页面。
+1.  前往 [**Releases**](https://gitee.com/MinQ/Raw-Alchemy/releases) 页面。
 2.  下载适用于您系统的最新可执行文件 (例如 `RawAlchemy-vX.Y.Z-windows.exe` 或 `RawAlchemy-vX.Y.Z-linux`)。
 3.  运行工具。详情请参阅 [使用方法](#使用方法) 部分。
 
@@ -64,7 +64,7 @@
 
 ```bash
 # 克隆本仓库
-git clone https://github.com/shenmintao/raw-alchemy.git
+git clone https://gitee.com/MinQ/Raw-Alchemy.git
 cd raw-alchemy
 
 # 安装工具及其依赖
@@ -108,6 +108,14 @@ pip install .
 *   **Auto** (自动): 这是默认模式。您可以从 **Metering** (测光) 下拉菜单中选择一种测光方式 (例如 `hybrid`, `average` 等)，让程序自动确定最佳曝光。
 *   **Manual** (手动): 选择此模式以覆盖自动曝光。然后您可以在 **EV Stops** (曝光档位) 输入框中输入一个特定的 EV 值，或使用滑块来手动调整曝光补偿。
 
+**Metering** (测光) 下拉菜单（在 `Auto` 模式下可用）允许您选择自动曝光的策略：
+
+*   **`matrix` (矩阵测光，默认)**: 高级评价测光模式。它将图像划分为 7x7 网格，并根据每个区域的亮度和位置进行智能加权。它会主动抑制高光、提升阴影，为复杂场景提供最均衡、最可靠的曝光。
+*   **`hybrid` (混合测光)**: 一个更简单、更快速的智能模式。它以平衡的平均曝光为目标，但如果检测到高光有过曝风险，会自动降低亮度以保护细节。
+*   **`average` (平均测光)**: 计算整个场景的平均亮度并将其调整到中性灰。最适合光线均匀的场景。
+*   **`center-weighted` (中央重点测光)**: 优先考虑画面中心的亮度。非常适合人像或主体在中心的拍摄。
+*   **`highlight-safe` (高光保护测光, ETTR)**: 在不裁剪高光的前提下，尽可能地提高画面曝光。这种方法能捕捉到最丰富的暗部细节，但可能需要您在后期处理中降低曝光。
+
 #### 4. 开始处理
 
 *   点击 **Start Processing** (开始处理) 按钮。
@@ -118,7 +126,7 @@ pip install .
 
 Raw Alchemy 现在包含一个强大的脚本，用于转换和导入 Adobe LCP 格式的镜头配置文件。LCP 格式被 Adobe Camera Raw 和 DNG Converter 使用，这意味着您可以访问一个更庞大、更及时的镜头数据库。
 
-转换脚本 `lensfun-convert-lcp` 已随源代码一同打包。
+用于转换的脚本 lensfun-convert-lcp-new 可在 [**Lensfun**](https://gitee.com/MinQ/lensfun) 中找到。
 
 **步骤：**
 
@@ -128,28 +136,12 @@ Raw Alchemy 现在包含一个强大的脚本，用于转换和导入 Adobe LCP 
     *   **macOS**: `/Library/Application Support/Adobe/CameraRaw/LensProfiles/1.0/`
 
 2.  **运行转换脚本。**
-    该脚本位于 `src/raw_alchemy/vendor/lensfun/` 目录中。您需要安装 Python 才能运行它。
-
-    打开您的终端，进入 Raw Alchemy 项目目录，并根据您的操作系统运行相应的脚本：
-
-    ```bash
-    # 在 Windows 上
-    python src/raw_alchemy/vendor/lensfun/win-x86_64/lensfun-convert-lcp "C:\ProgramData\Adobe\CameraRaw\LensProfiles\1.0"
-
-    # 在 Linux 上
-    python3 src/raw_alchemy/vendor/lensfun/linux-x86_64/lensfun-convert-lcp /path/to/your/lcp/files
-    ```
+    该脚本位于 lensfun 项目的 apps/ 目录下，您需要安装 Python 才能运行它。
 
 3.  脚本将创建一个 `.xml` 文件 (例如 `_lcps.xml`)。您现在可以按照下面章节的说明，在图形界面或命令行中加载此文件。
 
     转换脚本会保存到默认位置，但您也可以使用其 `--output` 参数将 `.xml` 文件保存到任何您喜欢的地方。更多详情，请使用 `--help` 参数运行该脚本。
 
-    **去重建议：** 该脚本可以与现有数据库进行比对，以避免创建重复条目。强烈建议使用 `--db-path` 参数指向项目自带的数据库。这能确保只有新的、未转换过的镜头才会被添加到您的自定义文件中。
-
-    ```bash
-    # 在 Windows 上使用去重功能示例
-    python src/raw_alchemy/vendor/lensfun/win-x86_64/lensfun-convert-lcp "C:\ProgramData\Adobe\CameraRaw\LensProfiles\1.0" --db-path "src/raw_alchemy/vendor/lensfun/db"
-    ```
 
 ### CLI 用法
 
